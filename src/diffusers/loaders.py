@@ -3186,6 +3186,14 @@ class ParametrizationsLoaderMixin:
                     param_module.load_state_dict(value_dict)
 
     @staticmethod
+    def clear_parametrizations_modules(model: torch.nn.Module):
+        param_modules = {}
+        for name, module in model.named_modules():
+            if torch.nn.utils.parametrize.is_parametrized(module, "weight"):
+                torch.nn.utils.parametrize.remove_parametrizations(module, "weight", leave_parametrized=False)
+        return param_modules
+
+    @staticmethod
     def get_parametrizations_modules(
         model: torch.nn.Module, parametrizations_class: type[torch.nn.Module]
     ) -> Optional[Dict[str, torch.nn.Module]]:
