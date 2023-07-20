@@ -11,14 +11,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
+
+import copy
 import importlib
 import os
 import re
 from collections import defaultdict
+from collections.abc import Iterable
 from contextlib import nullcontext
 from io import BytesIO
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import requests
 import safetensors
@@ -28,6 +32,7 @@ from packaging import version
 from torch import nn
 
 from .models.modeling_utils import _LOW_CPU_MEM_USAGE_DEFAULT, load_model_dict_into_meta
+from .models.parametrizations import OFTModule, SVDiffModule
 from .utils import (
     DIFFUSERS_CACHE,
     HF_HUB_OFFLINE,
@@ -36,6 +41,8 @@ from .utils import (
     convert_state_dict_to_peft,
     deprecate,
     is_accelerate_available,
+    is_accelerate_version,
+    is_compiled_module,
     is_omegaconf_available,
     is_peft_available,
     is_transformers_available,
@@ -65,6 +72,8 @@ TEXT_INVERSION_NAME_SAFE = "learned_embeds.safetensors"
 
 CUSTOM_DIFFUSION_WEIGHT_NAME = "pytorch_custom_diffusion_weights.bin"
 CUSTOM_DIFFUSION_WEIGHT_NAME_SAFE = "pytorch_custom_diffusion_weights.safetensors"
+
+PARAMETRIZATIONS_WEIGHT_NAME_SAFE = "pytorch_parametrizations_weights.safetensors"
 
 
 # Below should be `True` if the current version of `peft` and `transformers` are compatible with
@@ -2892,3 +2901,393 @@ class StableDiffusionXLLoraLoaderMixin(LoraLoaderMixin):
         else:
             self._remove_text_encoder_monkey_patch_classmethod(self.text_encoder)
             self._remove_text_encoder_monkey_patch_classmethod(self.text_encoder_2)
+        self._remove_text_encoder_monkey_patch_classmethod(self.text_encoder)
+        self._remove_text_encoder_monkey_patch_classmethod(self.text_encoder_2)
+
+
+class ParametrizationsLoaderMixin:
+    text_encoder_name = TEXT_ENCODER_NAME
+    unet_name = UNET_NAME
+    parametrizations_registry = (OFTModule, SVDiffModule)
+
+    def load_parametrizations_weights(
+        self,
+        pretrained_model_name_or_path_or_dict: Union[str, Dict[str, torch.Tensor]],
+        parametrizations_kwargs: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ):
+        """
+        Load layer parametrizations weights specified in `pretrained_model_name_or_path_or_dict`
+        into self.unet and self.text_encoder.
+
+        All kwargs are forwarded to `self.parametrizations_state_dict`.
+
+        See [`~loaders.ParametrizationsLoaderMixin.parametrizations_state_dict`]
+        for more details on how the state dict is loaded.
+
+        See [`~loaders.ParametrizationsLoaderMixin.load_parametrizations_into_unet`] for more details on how the
+        state dict is loaded into `self.unet`.
+
+        See [`~loaders.ParametrizationsLoaderMixin.load_parametrizations_into_text_encoder`] for more details on how
+        the state dict is loaded into `self.text_encoder`.
+
+        Parameters:
+            pretrained_model_name_or_path_or_dict (`str` or `os.PathLike` or `dict`):
+                See [`~loaders.ParametrizationsLoaderMixin.parametrizations_state_dict`].
+
+            kwargs:
+                See [`~loaders.ParametrizationsLoaderMixin.parametrizations_state_dict`].
+        """
+        state_dict, parametrizations_class = self.parametrizations_state_dict(
+            pretrained_model_name_or_path_or_dict, **kwargs
+        )
+        parametrizations_kwargs = parametrizations_kwargs or {}
+        self.load_parametrizations_into_unet(state_dict, parametrizations_class, self.unet, **parametrizations_kwargs)
+        self.load_parametrizations_into_text_encoder(
+            state_dict, parametrizations_class, self.text_encoder, **parametrizations_kwargs
+        )
+
+    @classmethod
+    def parametrizations_state_dict(
+        cls,
+        pretrained_model_name_or_path_or_dict: Union[str, Dict[str, torch.Tensor]],
+        **kwargs,
+    ) -> Tuple[Dict[str, torch.Tensor], type[torch.nn.Module]]:
+        r"""
+        Return state dict and inferred parametrizations module class for fine-tuned layer parametrizations weights.
+
+        Parameters:
+            pretrained_model_name_or_path_or_dict (`str` or `os.PathLike` or `dict`):
+                Can be either:
+
+                    - A string, the *model id* (for example `google/ddpm-celebahq-256`) of a pretrained model hosted on
+                      the Hub.
+                    - A path to a *directory* (for example `./my_model_directory`) containing the model weights saved
+                      with [`ModelMixin.save_pretrained`].
+                    - A [torch state
+                      dict](https://pytorch.org/tutorials/beginner/saving_loading_models.html#what-is-a-state-dict).
+
+            cache_dir (`Union[str, os.PathLike]`, *optional*):
+                Path to a directory where a downloaded pretrained model configuration is cached if the standard cache
+                is not used.
+            force_download (`bool`, *optional*, defaults to `False`):
+                Whether or not to force the (re-)download of the model weights and configuration files, overriding the
+                cached versions if they exist.
+            resume_download (`bool`, *optional*, defaults to `False`):
+                Whether or not to resume downloading the model weights and configuration files. If set to `False`, any
+                incompletely downloaded files are deleted.
+            proxies (`Dict[str, str]`, *optional*):
+                A dictionary of proxy servers to use by protocol or endpoint, for example, `{'http': 'foo.bar:3128',
+                'http://hostname': 'foo.bar:4012'}`. The proxies are used on each request.
+            local_files_only (`bool`, *optional*, defaults to `False`):
+                Whether to only load local model weights and configuration files or not. If set to `True`, the model
+                won't be downloaded from the Hub.
+            use_auth_token (`str` or *bool*, *optional*):
+                The token to use as HTTP bearer authorization for remote files. If `True`, the token generated from
+                `diffusers-cli login` (stored in `~/.huggingface`) is used.
+            revision (`str`, *optional*, defaults to `"main"`):
+                The specific model version to use. It can be a branch name, a tag name, a commit id, or any identifier
+                allowed by Git.
+            subfolder (`str`, *optional*, defaults to `""`):
+                The subfolder location of a model file within a larger model repository on the Hub or locally.
+            mirror (`str`, *optional*):
+                Mirror source to resolve accessibility issues if you're downloading a model in China. We do not
+                guarantee the timeliness or safety of the source, and you should refer to the mirror site for more
+                information.
+
+        """
+        # Load the main state dict first which has the weight parametrizations layers for either of
+        # UNet and text encoder or both.
+        cache_dir = kwargs.pop("cache_dir", DIFFUSERS_CACHE)
+        force_download = kwargs.pop("force_download", False)
+        resume_download = kwargs.pop("resume_download", False)
+        proxies = kwargs.pop("proxies", None)
+        local_files_only = kwargs.pop("local_files_only", HF_HUB_OFFLINE)
+        use_auth_token = kwargs.pop("use_auth_token", None)
+        revision = kwargs.pop("revision", None)
+        subfolder = kwargs.pop("subfolder", None)
+        weight_name = kwargs.pop("weight_name", None)
+
+        if not is_safetensors_available():
+            raise ValueError(
+                "Safetensors is not installed. Please install safetensors with `pip install safetensors`."
+            )
+
+        user_agent = {
+            "file_type": "parametrizations_weights",
+            "framework": "pytorch",
+        }
+
+        model_file = None
+        if not isinstance(pretrained_model_name_or_path_or_dict, dict):
+            try:
+                model_file = _get_model_file(
+                    pretrained_model_name_or_path_or_dict,
+                    weights_name=weight_name or PARAMETRIZATIONS_WEIGHT_NAME_SAFE,
+                    cache_dir=cache_dir,
+                    force_download=force_download,
+                    resume_download=resume_download,
+                    proxies=proxies,
+                    local_files_only=local_files_only,
+                    use_auth_token=use_auth_token,
+                    revision=revision,
+                    subfolder=subfolder,
+                    user_agent=user_agent,
+                )
+                state_dict = safetensors.torch.load_file(model_file, device="cpu")
+            except (IOError, safetensors.SafetensorError) as e:
+                raise e
+        else:
+            state_dict = pretrained_model_name_or_path_or_dict
+
+        parametrizations_class = next(
+            c
+            for c in cls.parametrizations_registry
+            if all(any(k.endswith(param_name) for param_name in c.param_keys) for k in state_dict.keys())
+        )
+
+        return state_dict, parametrizations_class
+
+    @classmethod
+    def load_parametrizations_into_unet(
+        cls,
+        state_dict: Dict[str, torch.Tensor],
+        parametrizations_class: type[torch.nn.Module],
+        unet: torch.nn.Module,
+        **parametrizations_kwargs,
+    ):
+        """
+        This will load the layer parametrizations weights specified in `state_dict` into `unet`.
+
+        Parameters:
+            state_dict (`dict`):
+                A standard state dict containing the layer parametrizations weights. The keys should be prefixed with
+                an additional `unet`, used to distinguish between UNet and text encoder layer parametrizations weights.
+            parametrizations_class (`type of torch.nn.Module`):
+                The type of parametrizations class to load layer parametrizations weights into. Typically inferred by
+                [`~loaders.ParametrizationsLoaderMixin.load_state_dict`] using the keys of `state_dict`.
+            unet (`UNet2DConditionModel`):
+                The UNet model to load the layer parametrizations weights into.
+        """
+
+        keys = list(state_dict.keys())
+        if all(key.startswith(cls.unet_name) or key.startswith(cls.text_encoder_name) for key in keys):
+            # Load the layers corresponding to UNet.
+            unet_keys = [k for k in keys if k.startswith(cls.unet_name)]
+            logger.info(f"Loading {cls.unet_name}.")
+            unet_parametrizations_state_dict = {
+                k.replace(f"{cls.unet_name}.", ""): v for k, v in state_dict.items() if k in unet_keys
+            }
+            if len(unet_parametrizations_state_dict) > 0:
+                weight_parametrizations_grouped_dict = defaultdict(dict)
+                for key, value in unet_parametrizations_state_dict.items():
+                    module_key, sub_key = ".".join(key.split(".")[:-1]), key.split(".")[-1]
+                    weight_parametrizations_grouped_dict[module_key][sub_key] = value
+
+                for name, value_dict in weight_parametrizations_grouped_dict.items():
+                    module = unet.get_submodule(name)
+                    param_module = None
+                    parametrizations_kwargs = parametrizations_class.get_parametrizations_kwargs(
+                        module.weight, value_dict, **parametrizations_kwargs
+                    )
+
+                    if torch.nn.utils.parametrize.is_parametrized(module, "weight"):
+                        try:
+                            param_module = next(
+                                iter(
+                                    p for p in module.parametrizations.weight if isinstance(p, parametrizations_class)
+                                )
+                            )
+                            param_module.load_state_dict(value_dict)
+                            continue
+                        except StopIteration:
+                            pass
+                    elif isinstance(module, torch.nn.Conv1d) or isinstance(module, torch.nn.Conv2d):
+                        param_module = parametrizations_class(
+                            module.weight, weight_type="conv", **parametrizations_kwargs
+                        )
+                    elif isinstance(module, torch.nn.LayerNorm) or isinstance(module, torch.nn.GroupNorm):
+                        param_module = parametrizations_class(
+                            module.weight, weight_type="1d", **parametrizations_kwargs
+                        )
+                    elif isinstance(module, torch.nn.Linear) or isinstance(module, torch.nn.Embedding):
+                        param_module = parametrizations_class(module.weight, **parametrizations_kwargs)
+
+                    torch.nn.utils.parametrize.register_parametrization(module, "weight", param_module)
+                    param_module.load_state_dict(value_dict)
+
+    @classmethod
+    def load_parametrizations_into_text_encoder(
+        cls,
+        state_dict: Dict[str, torch.Tensor],
+        parametrizations_class: type[torch.nn.Module],
+        text_encoder: torch.nn.Module,
+        **parametrizations_kwargs,
+    ):
+        """
+        This will load the layer parametrizations weights specified in `state_dict` into `text_encoder`.
+
+        Parameters:
+            state_dict (`dict`):
+                A standard state dict containing the layer parametrizations weights. The keys should be prefixed with
+                an additional `text_encoder`, used to distinguish between UNet and text encoder layer parametrizations
+                weights.
+            parametrizations_class (`type of torch.nn.Module`):
+                The type of parametrizations class to load layer parametrizations weights into. Typically inferred by
+                [`~loaders.ParametrizationsLoaderMixin.load_state_dict`] using the keys of `state_dict`.
+            text_encoder (`CLIPTextModel`):
+                The text encoder model to load the layer parametrizations weights into.
+        """
+
+        keys = list(state_dict.keys())
+        if all(key.startswith(cls.unet_name) or key.startswith(cls.text_encoder_name) for key in keys):
+            # Load the layers corresponding to UNet.
+            text_encoder_keys = [k for k in keys if k.startswith(cls.text_encoder_name)]
+            logger.info(f"Loading {cls.text_encoder_name}.")
+            text_encoder_parametrizations_state_dict = {
+                k.replace(f"{cls.text_encoder_name}.", ""): v for k, v in state_dict.items() if k in text_encoder_keys
+            }
+            if len(text_encoder_parametrizations_state_dict) > 0:
+                weight_parametrizations_grouped_dict = defaultdict(dict)
+                for key, value in text_encoder_parametrizations_state_dict.items():
+                    module_key, sub_key = ".".join(key.split(".")[:-1]), key.split(".")[-1]
+                    weight_parametrizations_grouped_dict[module_key][sub_key] = value
+
+                for name, value_dict in weight_parametrizations_grouped_dict.items():
+                    module = text_encoder.get_submodule(name)
+                    param_module = None
+                    parametrizations_kwargs = parametrizations_class.get_parametrizations_kwargs(
+                        module.weight, value_dict, **parametrizations_kwargs
+                    )
+
+                    if torch.nn.utils.parametrize.is_parametrized(module, "weight"):
+                        try:
+                            param_module = next(
+                                iter(
+                                    p for p in module.parametrizations.weight if isinstance(p, parametrizations_class)
+                                )
+                            )
+                            param_module.load_state_dict(value_dict)
+                            continue
+                        except StopIteration:
+                            pass
+                    elif isinstance(module, torch.nn.Conv1d) or isinstance(module, torch.nn.Conv2d):
+                        param_module = parametrizations_class(
+                            module.weight, weight_type="conv", **parametrizations_kwargs
+                        )
+                    elif isinstance(module, torch.nn.LayerNorm) or isinstance(module, torch.nn.GroupNorm):
+                        param_module = parametrizations_class(
+                            module.weight, weight_type="1d", **parametrizations_kwargs
+                        )
+                    elif isinstance(module, torch.nn.Linear) or isinstance(module, torch.nn.Embedding):
+                        param_module = parametrizations_class(module.weight, **parametrizations_kwargs)
+
+                    torch.nn.utils.parametrize.register_parametrization(module, "weight", param_module)
+                    param_module.load_state_dict(value_dict)
+
+    @staticmethod
+    def get_parametrizations_modules(
+        model: torch.nn.Module, parametrizations_class: type[torch.nn.Module]
+    ) -> Optional[Dict[str, torch.nn.Module]]:
+        param_modules = {}
+        for name, module in model.named_modules():
+            if torch.nn.utils.parametrize.is_parametrized(module, "weight"):
+                try:
+                    param_modules[name] = next(
+                        iter(
+                            p
+                            for p in module.parametrizations.weight
+                            if all(hasattr(p, key) for key in parametrizations_class.param_keys)
+                        )
+                    )
+                except StopIteration:
+                    pass
+        return param_modules
+
+    @staticmethod
+    def set_parametrizations_modules(
+        model: torch.nn.Module,
+        parametrizations_class: type[torch.nn.Module],
+        load_existing: bool = False,
+        filter_module_name_fn: Optional[Callable[str, bool]] = None,
+        **parametrizations_kwargs,
+    ) -> Optional[Dict[str, torch.nn.Module]]:
+        # key to module
+        param_modules = {}
+        for name, module in model.named_modules():
+            param_module = None
+            if filter_module_name_fn is not None and not filter_module_name_fn(name):
+                continue
+            if torch.nn.utils.parametrize.is_parametrized(module, "weight"):
+                if load_existing:
+                    try:
+                        param_modules[name] = next(
+                            iter(
+                                p
+                                for p in module.parametrizations.weight
+                                if all(hasattr(p, key) for key in parametrizations_class.param_keys)
+                            )
+                        )
+                        continue
+                    except StopIteration:
+                        pass
+                else:
+                    torch.nn.utils.parametrize.remove_parametrizations(module, "weight", leave_parametrized=False)
+            elif isinstance(module, torch.nn.Conv1d) or isinstance(module, torch.nn.Conv2d):
+                param_module = parametrizations_class(module.weight, weight_type="conv", **parametrizations_kwargs)
+            elif isinstance(module, torch.nn.LayerNorm) or isinstance(module, torch.nn.GroupNorm):
+                param_module = parametrizations_class(module.weight, weight_type="1d", **parametrizations_kwargs)
+            elif isinstance(module, torch.nn.Linear) or isinstance(module, torch.nn.Embedding):
+                param_module = parametrizations_class(module.weight, **parametrizations_kwargs)
+            if param_module:
+                param_modules[name] = param_module
+                # register parametrization
+                torch.nn.utils.parametrize.register_parametrization(module, "weight", param_module)
+
+        return param_modules
+
+    @classmethod
+    def save_parametrizations_weights(
+        self,
+        save_directory: Union[str, os.PathLike],
+        unet_parametrizations_layers: Dict[str, torch.Tensor],
+        text_encoder_parametrizations_layers: Dict[str, torch.Tensor],
+        weight_name: str = None,
+    ):
+        if os.path.isfile(save_directory):
+            logger.error(f"Provided path ({save_directory}) should be a directory, not a file")
+            return
+
+        state_dict = {}
+        if unet_parametrizations_layers is not None:
+            weights = (
+                unet_parametrizations_layers.state_dict()
+                if isinstance(unet_parametrizations_layers, torch.nn.Module)
+                or is_compiled_module(unet_parametrizations_layers)
+                else unet_parametrizations_layers
+            )
+
+            unet_params_state_dict = {
+                f"{self.unet_name}.{module_name}": param for module_name, param in weights.items()
+            }
+            state_dict.update(unet_params_state_dict)
+
+        if text_encoder_parametrizations_layers is not None:
+            weights = (
+                text_encoder_parametrizations_layers.state_dict()
+                if isinstance(text_encoder_parametrizations_layers, torch.nn.Module)
+                or is_compiled_module(text_encoder_parametrizations_layers)
+                else text_encoder_parametrizations_layers
+            )
+
+            text_encoder_params_state_dict = {
+                f"{self.text_encoder_name}.{module_name}": param for module_name, param in weights.items()
+            }
+            state_dict.update(text_encoder_params_state_dict)
+
+        # Save the model
+        if weight_name is None:
+            weight_name = PARAMETRIZATIONS_WEIGHT_NAME_SAFE
+
+        safetensors.torch.save_file(state_dict, os.path.join(save_directory, weight_name), metadata={"format": "pt"})
+        logger.info(f"Model weights saved in {os.path.join(save_directory, weight_name)}")

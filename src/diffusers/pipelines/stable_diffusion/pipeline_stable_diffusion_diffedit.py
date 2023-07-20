@@ -24,7 +24,7 @@ from transformers import CLIPImageProcessor, CLIPTextModel, CLIPTokenizer
 
 from ...configuration_utils import FrozenDict
 from ...image_processor import VaeImageProcessor
-from ...loaders import LoraLoaderMixin, TextualInversionLoaderMixin
+from ...loaders import LoraLoaderMixin, ParametrizationsLoaderMixin, TextualInversionLoaderMixin
 from ...models import AutoencoderKL, UNet2DConditionModel
 from ...models.lora import adjust_lora_scale_text_encoder
 from ...schedulers import DDIMInverseScheduler, KarrasDiffusionSchedulers
@@ -232,7 +232,9 @@ def preprocess_mask(mask, batch_size: int = 1):
     return mask
 
 
-class StableDiffusionDiffEditPipeline(DiffusionPipeline, TextualInversionLoaderMixin, LoraLoaderMixin):
+class StableDiffusionDiffEditPipeline(
+    DiffusionPipeline, TextualInversionLoaderMixin, LoraLoaderMixin, ParametrizationsLoaderMixin
+):
     r"""
     <Tip warning={true}>
 
@@ -249,6 +251,8 @@ class StableDiffusionDiffEditPipeline(DiffusionPipeline, TextualInversionLoaderM
         - [`~loaders.TextualInversionLoaderMixin.load_textual_inversion`] for loading textual inversion embeddings
         - [`~loaders.LoraLoaderMixin.load_lora_weights`] for loading LoRA weights
         - [`~loaders.LoraLoaderMixin.save_lora_weights`] for saving LoRA weights
+        - [`~loaders.ParametrizationsLoaderMixin.load_param_weights`] for saving Layer Parametrizations weights
+        - [`~loaders.ParametrizationsLoaderMixin.save_param_weights`] for saving Layer Parametrizations weights
 
     Args:
         vae ([`AutoencoderKL`]):

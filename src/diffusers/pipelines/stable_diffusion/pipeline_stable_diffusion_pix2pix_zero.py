@@ -29,7 +29,7 @@ from transformers import (
 )
 
 from ...image_processor import PipelineImageInput, VaeImageProcessor
-from ...loaders import LoraLoaderMixin, TextualInversionLoaderMixin
+from ...loaders import LoraLoaderMixin, ParametrizationsLoaderMixin, TextualInversionLoaderMixin
 from ...models import AutoencoderKL, UNet2DConditionModel
 from ...models.attention_processor import Attention
 from ...models.lora import adjust_lora_scale_text_encoder
@@ -277,12 +277,18 @@ class Pix2PixZeroAttnProcessor:
         return hidden_states
 
 
-class StableDiffusionPix2PixZeroPipeline(DiffusionPipeline):
+class StableDiffusionPix2PixZeroPipeline(DiffusionPipeline, ParametrizationsLoaderMixin):
     r"""
     Pipeline for pixel-levl image editing using Pix2Pix Zero. Based on Stable Diffusion.
 
     This model inherits from [`DiffusionPipeline`]. Check the superclass documentation for the generic methods the
     library implements for all the pipelines (such as downloading or saving, running on a particular device, etc.)
+
+    In addition the pipeline inherits the following loading methods:
+        - *PEFT*: [`loaders.ParametrizationsLoaderMixin.load_param_weights`]
+
+    as well as the following saving methods:
+        - *PEFT*: [`loaders.ParametrizationsLoaderMixin.save_param_weights`]
 
     Args:
         vae ([`AutoencoderKL`]):
