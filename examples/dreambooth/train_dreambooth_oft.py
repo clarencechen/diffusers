@@ -15,6 +15,7 @@
 # limitations under the License.
 
 import argparse
+import copy
 import gc
 import hashlib
 import itertools
@@ -454,9 +455,10 @@ def parse_args(input_args=None):
         "--use_coft", action="store_true", default=False, help=("Use the matrix norm-constrainted variant of OFT.")
     )
     parser.add_argument(
-        "--share_oft_blocks", action="store_true", default=False, help=(
-            "Tie the values of the diagonal blocks in the orthogonal matrix to a single set of parameters."
-        )
+        "--share_oft_blocks",
+        action="store_true",
+        default=False,
+        help=("Tie the values of the diagonal blocks in the orthogonal matrix to a single set of parameters."),
     )
 
     if input_args is not None:
@@ -1112,7 +1114,9 @@ def main(args):
     # We need to initialize the trackers we use, and also store our configuration.
     # The trackers initializes automatically on the main process.
     if accelerator.is_main_process:
-        accelerator.init_trackers("dreambooth-oft", config=vars(args))
+        tracker_config = vars(copy.deepcopy(args))
+        tracker_config.pop("validation_images")
+        accelerator.init_trackers("dreambooth-oft", config=tracker_config)
 
     # Train!
     total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
