@@ -908,44 +908,45 @@ def main(args):
 
     # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
     def save_model_hook(models, weights, output_dir):
-        # there are only two options here. Either are just the unet attn processor layers
-        # or there are the unet and text encoder atten layers
-        unet_oft_layers_to_save = None
-        text_encoder_oft_layers_to_save = None
+        if accelerator.is_main_process:
+            # there are only two options here. Either are just the unet attn processor layers
+            # or there are the unet and text encoder atten layers
+            unet_oft_layers_to_save = None
+            text_encoder_oft_layers_to_save = None
 
-        unwrapped_text_encoder = accelerator.unwrap_model(text_encoder)
-        if is_compiled_module(unwrapped_text_encoder):
-            unwrapped_text_encoder = unwrapped_text_encoder._orig_mod
-        unwrapped_unet = accelerator.unwrap_model(unet)
-        if is_compiled_module(unwrapped_unet):
-            unwrapped_unet = unwrapped_unet._orig_mod
+            unwrapped_text_encoder = accelerator.unwrap_model(text_encoder)
+            if is_compiled_module(unwrapped_text_encoder):
+                unwrapped_text_encoder = unwrapped_text_encoder._orig_mod
+            unwrapped_unet = accelerator.unwrap_model(unet)
+            if is_compiled_module(unwrapped_unet):
+                unwrapped_unet = unwrapped_unet._orig_mod
 
-        for model in models:
-            if isinstance(model, type(unwrapped_unet)):
-                unet_oft_layers_to_save = {}
-                for module_key, param_module in ParametrizationsLoaderMixin.get_parametrizations_modules(
-                    unwrapped_unet, OFTModule
-                ).items():
-                    for parameter_key, parameter in param_module.state_dict().items():
-                        unet_oft_layers_to_save[f"{module_key}.{parameter_key}"] = parameter
-            elif isinstance(model, type(unwrapped_text_encoder)):
-                text_encoder_oft_layers_to_save = {}
-                for module_key, param_module in ParametrizationsLoaderMixin.get_parametrizations_modules(
-                    unwrapped_text_encoder, OFTModule
-                ).items():
-                    for parameter_key, parameter in param_module.state_dict().items():
-                        text_encoder_oft_layers_to_save[f"{module_key}.{parameter_key}"] = parameter
-            else:
-                raise ValueError(f"unexpected save model: {model.__class__}")
+            for model in models:
+                if isinstance(model, type(unwrapped_unet)):
+                    unet_oft_layers_to_save = {}
+                    for module_key, param_module in ParametrizationsLoaderMixin.get_parametrizations_modules(
+                        unwrapped_unet, OFTModule
+                    ).items():
+                        for parameter_key, parameter in param_module.state_dict().items():
+                            unet_oft_layers_to_save[f"{module_key}.{parameter_key}"] = parameter
+                elif isinstance(model, type(unwrapped_text_encoder)):
+                    text_encoder_oft_layers_to_save = {}
+                    for module_key, param_module in ParametrizationsLoaderMixin.get_parametrizations_modules(
+                        unwrapped_text_encoder, OFTModule
+                    ).items():
+                        for parameter_key, parameter in param_module.state_dict().items():
+                            text_encoder_oft_layers_to_save[f"{module_key}.{parameter_key}"] = parameter
+                else:
+                    raise ValueError(f"unexpected save model: {model.__class__}")
 
-            # make sure to pop weight so that corresponding model is not saved again
-            weights.pop()
+                # make sure to pop weight so that corresponding model is not saved again
+                weights.pop()
 
-        ParametrizationsLoaderMixin.save_parametrizations_weights(
-            output_dir,
-            unet_parametrizations_layers=unet_oft_layers_to_save,
-            text_encoder_parametrizations_layers=text_encoder_oft_layers_to_save,
-        )
+            ParametrizationsLoaderMixin.save_parametrizations_weights(
+                output_dir,
+                unet_parametrizations_layers=unet_oft_layers_to_save,
+                text_encoder_parametrizations_layers=text_encoder_oft_layers_to_save,
+            )
 
     def load_model_hook(models, input_dir):
         unet_ = None
