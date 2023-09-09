@@ -2938,6 +2938,21 @@ class ParametrizationsLoaderMixin:
             kwargs:
                 See [`~loaders.ParametrizationsLoaderMixin.parametrizations_state_dict`].
         """
+        # Remove any existing hooks.
+        is_model_cpu_offload = False
+        is_sequential_cpu_offload = False
+        recursive = False
+        for _, component in self.components.items():
+            if isinstance(component, nn.Module):
+                if hasattr(component, "_hf_hook"):
+                    is_model_cpu_offload = isinstance(getattr(component, "_hf_hook"), CpuOffload)
+                    is_sequential_cpu_offload = isinstance(getattr(component, "_hf_hook"), AlignDevicesHook)
+                    logger.info(
+                        "Accelerate hooks detected. Since you have called `load_lora_weights()`, the previous hooks will be first removed. Then the LoRA parameters will be loaded and the hooks will be applied again."
+                    )
+                    recursive = is_sequential_cpu_offload
+                    remove_hook_from_module(component, recurse=recursive)
+
         state_dict, parametrizations_class = self.parametrizations_state_dict(
             pretrained_model_name_or_path_or_dict, **kwargs
         )
@@ -2946,6 +2961,12 @@ class ParametrizationsLoaderMixin:
         self.load_parametrizations_into_text_encoder(
             state_dict, parametrizations_class, self.text_encoder, **parametrizations_kwargs
         )
+
+        # Offload back.
+        if is_model_cpu_offload:
+            self.enable_model_cpu_offload()
+        elif is_sequential_cpu_offload:
+            self.enable_sequential_cpu_offload()
 
     @classmethod
     def parametrizations_state_dict(
