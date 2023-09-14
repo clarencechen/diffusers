@@ -33,6 +33,7 @@ from torch import nn
 
 from .models.modeling_utils import _LOW_CPU_MEM_USAGE_DEFAULT, load_model_dict_into_meta
 from .models.parametrizations import OFTModule, SVDiffModule
+from .torch_utils import is_compiled_module
 from .utils import (
     DIFFUSERS_CACHE,
     HF_HUB_OFFLINE,
@@ -42,7 +43,6 @@ from .utils import (
     deprecate,
     is_accelerate_available,
     is_accelerate_version,
-    is_compiled_module,
     is_omegaconf_available,
     is_peft_available,
     is_transformers_available,

@@ -54,7 +54,8 @@ from diffusers import (
 from diffusers.loaders import ParametrizationsLoaderMixin
 from diffusers.models.parametrizations import SVDiffModule
 from diffusers.optimization import get_scheduler
-from diffusers.utils import check_min_version, is_compiled_module, is_wandb_available
+from diffusers.utils import check_min_version, is_wandb_available
+from diffusers.utils.torch_utils import is_compiled_module
 from diffusers.utils.import_utils import is_xformers_available
 
 
