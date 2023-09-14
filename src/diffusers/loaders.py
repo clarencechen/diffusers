@@ -3011,6 +3011,11 @@ class ParametrizationsLoaderMixin:
                 allowed by Git.
             subfolder (`str`, *optional*, defaults to `""`):
                 The subfolder location of a model file within a larger model repository on the Hub or locally.
+            low_cpu_mem_usage (`bool`, *optional*, defaults to `True` if torch version >= 1.9.0 else `False`):
+                Speed up model loading only loading the pretrained weights and not initializing the weights. This also
+                tries to not use more than 1x model size in CPU memory (including peak memory) while loading the model.
+                Only supported for PyTorch >= 1.9.0. If you are using an older version of PyTorch, setting this
+                argument to `True` will raise an error.
             mirror (`str`, *optional*):
                 Mirror source to resolve accessibility issues if you're downloading a model in China. We do not
                 guarantee the timeliness or safety of the source, and you should refer to the mirror site for more
@@ -3075,6 +3080,7 @@ class ParametrizationsLoaderMixin:
         state_dict: Dict[str, torch.Tensor],
         parametrizations_class: type[torch.nn.Module],
         unet: torch.nn.Module,
+        low_cpu_mem_usage: Optional[bool] = None,
         **parametrizations_kwargs,
     ):
         """
@@ -3089,7 +3095,22 @@ class ParametrizationsLoaderMixin:
                 [`~loaders.ParametrizationsLoaderMixin.load_state_dict`] using the keys of `state_dict`.
             unet (`UNet2DConditionModel`):
                 The UNet model to load the layer parametrizations weights into.
+            low_cpu_mem_usage (`bool`, *optional*, defaults to `True` if torch version >= 1.9.0 else `False`):
+                Speed up model loading only loading the pretrained weights and not initializing the weights. This also
+                tries to not use more than 1x model size in CPU memory (including peak memory) while loading the model.
+                Only supported for PyTorch >= 1.9.0. If you are using an older version of PyTorch, setting this
+                argument to `True` will raise an error.
         """
+        low_cpu_mem_usage = low_cpu_mem_usage if low_cpu_mem_usage is not None else _LOW_CPU_MEM_USAGE_DEFAULT
+        if low_cpu_mem_usage and not is_accelerate_available():
+            low_cpu_mem_usage = False
+            logger.warning(
+                "Cannot initialize model with low cpu memory usage because `accelerate` was not found in the"
+                " environment. Defaulting to `low_cpu_mem_usage=False`. It is strongly recommended to install"
+                " `accelerate` for faster and less memory-intense model loading. You can do so with: \n```\npip"
+                " install accelerate\n```\n."
+            )
+        ctx = init_empty_weights if low_cpu_mem_usage else nullcontext
 
         keys = list(state_dict.keys())
         if all(key.startswith(cls.unet_name) or key.startswith(cls.text_encoder_name) for key in keys):
@@ -3119,23 +3140,36 @@ class ParametrizationsLoaderMixin:
                                     p for p in module.parametrizations.weight if isinstance(p, parametrizations_class)
                                 )
                             )
-                            param_module.load_state_dict(value_dict)
+                            if low_cpu_mem_usage:
+                                device = next(iter(value_dict.values())).device
+                                dtype = next(iter(value_dict.values())).dtype
+                                load_model_dict_into_meta(param_module, value_dict, device=device, dtype=dtype)
+                            else:
+                                param_module.load_state_dict(value_dict)
                             continue
                         except StopIteration:
                             pass
                     elif isinstance(module, torch.nn.Conv1d) or isinstance(module, torch.nn.Conv2d):
-                        param_module = parametrizations_class(
-                            module.weight, weight_type="conv", **parametrizations_kwargs
-                        )
+                        with ctx():
+                            param_module = parametrizations_class(
+                                module.weight, weight_type="conv", **parametrizations_kwargs
+                            )
                     elif isinstance(module, torch.nn.LayerNorm) or isinstance(module, torch.nn.GroupNorm):
-                        param_module = parametrizations_class(
-                            module.weight, weight_type="1d", **parametrizations_kwargs
-                        )
+                        with ctx():
+                            param_module = parametrizations_class(
+                                module.weight, weight_type="1d", **parametrizations_kwargs
+                            )
                     elif isinstance(module, torch.nn.Linear) or isinstance(module, torch.nn.Embedding):
-                        param_module = parametrizations_class(module.weight, **parametrizations_kwargs)
+                        with ctx():
+                            param_module = parametrizations_class(module.weight, **parametrizations_kwargs)
 
                     torch.nn.utils.parametrize.register_parametrization(module, "weight", param_module)
-                    param_module.load_state_dict(value_dict)
+                    if low_cpu_mem_usage:
+                        device = next(iter(value_dict.values())).device
+                        dtype = next(iter(value_dict.values())).dtype
+                        load_model_dict_into_meta(param_module, value_dict, device=device, dtype=dtype)
+                    else:
+                        param_module.load_state_dict(value_dict)
 
     @classmethod
     def load_parametrizations_into_text_encoder(
@@ -3143,6 +3177,7 @@ class ParametrizationsLoaderMixin:
         state_dict: Dict[str, torch.Tensor],
         parametrizations_class: type[torch.nn.Module],
         text_encoder: torch.nn.Module,
+        low_cpu_mem_usage: Optional[bool] = None,
         **parametrizations_kwargs,
     ):
         """
@@ -3158,7 +3193,22 @@ class ParametrizationsLoaderMixin:
                 [`~loaders.ParametrizationsLoaderMixin.load_state_dict`] using the keys of `state_dict`.
             text_encoder (`CLIPTextModel`):
                 The text encoder model to load the layer parametrizations weights into.
+            low_cpu_mem_usage (`bool`, *optional*, defaults to `True` if torch version >= 1.9.0 else `False`):
+                Speed up model loading only loading the pretrained weights and not initializing the weights. This also
+                tries to not use more than 1x model size in CPU memory (including peak memory) while loading the model.
+                Only supported for PyTorch >= 1.9.0. If you are using an older version of PyTorch, setting this
+                argument to `True` will raise an error.
         """
+        low_cpu_mem_usage = low_cpu_mem_usage if low_cpu_mem_usage is not None else _LOW_CPU_MEM_USAGE_DEFAULT
+        if low_cpu_mem_usage and not is_accelerate_available():
+            low_cpu_mem_usage = False
+            logger.warning(
+                "Cannot initialize model with low cpu memory usage because `accelerate` was not found in the"
+                " environment. Defaulting to `low_cpu_mem_usage=False`. It is strongly recommended to install"
+                " `accelerate` for faster and less memory-intense model loading. You can do so with: \n```\npip"
+                " install accelerate\n```\n."
+            )
+        ctx = init_empty_weights if low_cpu_mem_usage else nullcontext
 
         keys = list(state_dict.keys())
         if all(key.startswith(cls.unet_name) or key.startswith(cls.text_encoder_name) for key in keys):
@@ -3188,23 +3238,36 @@ class ParametrizationsLoaderMixin:
                                     p for p in module.parametrizations.weight if isinstance(p, parametrizations_class)
                                 )
                             )
-                            param_module.load_state_dict(value_dict)
+                            if low_cpu_mem_usage:
+                                device = next(iter(value_dict.values())).device
+                                dtype = next(iter(value_dict.values())).dtype
+                                load_model_dict_into_meta(param_module, value_dict, device=device, dtype=dtype)
+                            else:
+                                param_module.load_state_dict(value_dict)
                             continue
                         except StopIteration:
                             pass
                     elif isinstance(module, torch.nn.Conv1d) or isinstance(module, torch.nn.Conv2d):
-                        param_module = parametrizations_class(
-                            module.weight, weight_type="conv", **parametrizations_kwargs
-                        )
+                        with ctx():
+                            param_module = parametrizations_class(
+                                module.weight, weight_type="conv", **parametrizations_kwargs
+                            )
                     elif isinstance(module, torch.nn.LayerNorm) or isinstance(module, torch.nn.GroupNorm):
-                        param_module = parametrizations_class(
-                            module.weight, weight_type="1d", **parametrizations_kwargs
-                        )
+                        with ctx():
+                            param_module = parametrizations_class(
+                                module.weight, weight_type="1d", **parametrizations_kwargs
+                            )
                     elif isinstance(module, torch.nn.Linear) or isinstance(module, torch.nn.Embedding):
-                        param_module = parametrizations_class(module.weight, **parametrizations_kwargs)
+                        with ctx():
+                            param_module = parametrizations_class(module.weight, **parametrizations_kwargs)
 
                     torch.nn.utils.parametrize.register_parametrization(module, "weight", param_module)
-                    param_module.load_state_dict(value_dict)
+                    if low_cpu_mem_usage:
+                        device = next(iter(value_dict.values())).device
+                        dtype = next(iter(value_dict.values())).dtype
+                        load_model_dict_into_meta(param_module, value_dict, device=device, dtype=dtype)
+                    else:
+                        param_module.load_state_dict(value_dict)
 
     @staticmethod
     def clear_parametrizations_modules(model: torch.nn.Module):
