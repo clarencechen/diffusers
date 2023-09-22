@@ -591,35 +591,36 @@ def convert_ldm_unet_checkpoint(
     if controlnet:
         # conditioning embedding
 
-        orig_index = 0
+        if config["conditioning_embedding_out_channels"] is not None:
+            orig_index = 0
 
-        new_checkpoint["controlnet_cond_embedding.conv_in.weight"] = unet_state_dict.pop(
-            f"input_hint_block.{orig_index}.weight"
-        )
-        new_checkpoint["controlnet_cond_embedding.conv_in.bias"] = unet_state_dict.pop(
-            f"input_hint_block.{orig_index}.bias"
-        )
-
-        orig_index += 2
-
-        diffusers_index = 0
-
-        while diffusers_index < 6:
-            new_checkpoint[f"controlnet_cond_embedding.blocks.{diffusers_index}.weight"] = unet_state_dict.pop(
+            new_checkpoint["controlnet_cond_embedding.conv_in.weight"] = unet_state_dict.pop(
                 f"input_hint_block.{orig_index}.weight"
             )
-            new_checkpoint[f"controlnet_cond_embedding.blocks.{diffusers_index}.bias"] = unet_state_dict.pop(
+            new_checkpoint["controlnet_cond_embedding.conv_in.bias"] = unet_state_dict.pop(
                 f"input_hint_block.{orig_index}.bias"
             )
-            diffusers_index += 1
+
             orig_index += 2
 
-        new_checkpoint["controlnet_cond_embedding.conv_out.weight"] = unet_state_dict.pop(
-            f"input_hint_block.{orig_index}.weight"
-        )
-        new_checkpoint["controlnet_cond_embedding.conv_out.bias"] = unet_state_dict.pop(
-            f"input_hint_block.{orig_index}.bias"
-        )
+            diffusers_index = 0
+
+            while diffusers_index < 6:
+                new_checkpoint[f"controlnet_cond_embedding.blocks.{diffusers_index}.weight"] = unet_state_dict.pop(
+                    f"input_hint_block.{orig_index}.weight"
+                )
+                new_checkpoint[f"controlnet_cond_embedding.blocks.{diffusers_index}.bias"] = unet_state_dict.pop(
+                    f"input_hint_block.{orig_index}.bias"
+                )
+                diffusers_index += 1
+                orig_index += 2
+
+            new_checkpoint["controlnet_cond_embedding.conv_out.weight"] = unet_state_dict.pop(
+                f"input_hint_block.{orig_index}.weight"
+            )
+            new_checkpoint["controlnet_cond_embedding.conv_out.bias"] = unet_state_dict.pop(
+                f"input_hint_block.{orig_index}.bias"
+            )
 
         # down blocks
         for i in range(num_input_blocks):
@@ -1092,6 +1093,7 @@ def convert_controlnet_checkpoint(
     image_size,
     upcast_attention,
     extract_ema,
+    use_cond_embedding=None,
     use_linear_projection=None,
     cross_attention_dim=None,
 ):
@@ -1102,6 +1104,9 @@ def convert_controlnet_checkpoint(
 
     if use_linear_projection is not None:
         ctrlnet_config["use_linear_projection"] = use_linear_projection
+
+    if use_cond_embedding is not None and not use_cond_embedding:
+        ctrlnet_config["conditioning_embedding_out_channels"] = None
 
     if cross_attention_dim is not None:
         ctrlnet_config["cross_attention_dim"] = cross_attention_dim
@@ -1821,6 +1826,7 @@ def download_controlnet_from_original_ckpt(
     upcast_attention: Optional[bool] = None,
     device: str = None,
     from_safetensors: bool = False,
+    use_cond_embedding: Optional[bool] = None,
     use_linear_projection: Optional[bool] = None,
     cross_attention_dim: Optional[bool] = None,
 ) -> DiffusionPipeline:
@@ -1860,6 +1866,7 @@ def download_controlnet_from_original_ckpt(
         image_size,
         upcast_attention,
         extract_ema,
+        use_cond_embedding=use_cond_embedding,
         use_linear_projection=use_linear_projection,
         cross_attention_dim=cross_attention_dim,
     )

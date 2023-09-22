@@ -250,6 +250,8 @@ class ControlNetModel(ModelMixin, ConfigMixin, FromOriginalControlNetMixin):
             transformer_layers_per_block = [transformer_layers_per_block] * len(down_block_types)
 
         # input
+        if conditioning_embedding_out_channels is None:
+            in_channels += conditioning_channels
         conv_in_kernel = 3
         conv_in_padding = (conv_in_kernel - 1) // 2
         self.conv_in = nn.Conv2d(
@@ -342,11 +344,13 @@ class ControlNetModel(ModelMixin, ConfigMixin, FromOriginalControlNetMixin):
             raise ValueError(f"addition_embed_type: {addition_embed_type} must be None, 'text' or 'text_image'.")
 
         # control net conditioning embedding
-        self.controlnet_cond_embedding = ControlNetConditioningEmbedding(
-            conditioning_embedding_channels=block_out_channels[0],
-            block_out_channels=conditioning_embedding_out_channels,
-            conditioning_channels=conditioning_channels,
-        )
+        self.controlnet_cond_embedding = None
+        if conditioning_embedding_out_channels is not None:
+            self.controlnet_cond_embedding = ControlNetConditioningEmbedding(
+                conditioning_embedding_channels=block_out_channels[0],
+                block_out_channels=conditioning_embedding_out_channels,
+                conditioning_channels=conditioning_channels,
+            )
 
         self.down_blocks = nn.ModuleList([])
         self.controlnet_down_blocks = nn.ModuleList([])
@@ -795,10 +799,14 @@ class ControlNetModel(ModelMixin, ConfigMixin, FromOriginalControlNetMixin):
         emb = emb + aug_emb if aug_emb is not None else emb
 
         # 2. pre-process
+        if self.controlnet_cond_embedding is None:
+            sample = torch.concat([sample, controlnet_cond], dim=1)
+
         sample = self.conv_in(sample)
 
-        controlnet_cond = self.controlnet_cond_embedding(controlnet_cond)
-        sample = sample + controlnet_cond
+        if self.controlnet_cond_embedding is not None:
+            controlnet_cond = self.controlnet_cond_embedding(controlnet_cond)
+            sample = sample + controlnet_cond
 
         # 3. down
         down_block_res_samples = (sample,)

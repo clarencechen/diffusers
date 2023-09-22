@@ -962,7 +962,7 @@ def convert_controlnet_checkpoint(
 
 
 def create_diffusers_controlnet_model_from_ldm(
-    pipeline_class_name, original_config, checkpoint, upcast_attention=False, image_size=None, torch_dtype=None
+    pipeline_class_name, original_config, checkpoint, upcast_attention=False, image_size=None, use_cond_embedding=True, torch_dtype=None
 ):
     # import here to avoid circular imports
     from ..models import ControlNetModel
@@ -971,6 +971,8 @@ def create_diffusers_controlnet_model_from_ldm(
 
     diffusers_config = create_controlnet_diffusers_config(original_config, image_size=image_size)
     diffusers_config["upcast_attention"] = upcast_attention
+    if not use_cond_embedding:
+        diffusers_config["conditioning_embedding_out_channels"] = None
 
     diffusers_format_controlnet_checkpoint = convert_controlnet_checkpoint(checkpoint, diffusers_config)
 

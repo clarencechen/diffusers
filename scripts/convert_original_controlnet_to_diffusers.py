@@ -89,6 +89,10 @@ if __name__ == "__main__":
         "--use_linear_projection", help="Override for use linear projection", required=False, type=parse_bool
     )
 
+    parser.add_argument(
+        "--use_cond_embedding", help="Override for use condition embedding", required=False, type=parse_bool
+    )
+
     parser.add_argument("--cross_attention_dim", help="Override for cross attention_dim", required=False, type=int)
 
     args = parser.parse_args()
@@ -102,6 +106,7 @@ if __name__ == "__main__":
         upcast_attention=args.upcast_attention,
         from_safetensors=args.from_safetensors,
         device=args.device,
+        use_cond_embedding=args.use_cond_embedding,
         use_linear_projection=args.use_linear_projection,
         cross_attention_dim=args.cross_attention_dim,
     )

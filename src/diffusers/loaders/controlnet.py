@@ -119,6 +119,7 @@ class FromOriginalControlNetMixin:
         )
 
         upcast_attention = kwargs.pop("upcast_attention", False)
+        use_cond_embedding = kwargs.pop("use_cond_embedding", True)
         image_size = kwargs.pop("image_size", None)
 
         component = create_diffusers_controlnet_model_from_ldm(
@@ -127,6 +128,7 @@ class FromOriginalControlNetMixin:
             checkpoint,
             upcast_attention=upcast_attention,
             image_size=image_size,
+            use_cond_embedding=use_cond_embedding,
             torch_dtype=torch_dtype,
         )
         controlnet = component["controlnet"]
