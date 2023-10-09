@@ -1013,7 +1013,7 @@ class StableDiffusionSAGPipeline(DiffusionPipeline, StableDiffusionMixin, Textua
     # Modified from diffusers.schedulers.scheduling_ddim.DDIMScheduler.step
     # Note: there are some schedulers that clip or do not return x_0 (PNDMScheduler, DDIMScheduler, etc.)
     def pred_x0(self, sample, model_output, timestep):
-        alpha_prod_t = self.scheduler.alphas_cumprod[timestep].to(sample.device)
+        alpha_prod_t = self.scheduler.alphas_cumprod[int(timestep.item())].to(sample.device)
 
         beta_prod_t = 1 - alpha_prod_t
         if self.scheduler.config.prediction_type == "epsilon":
@@ -1033,7 +1033,7 @@ class StableDiffusionSAGPipeline(DiffusionPipeline, StableDiffusionMixin, Textua
         return pred_original_sample
 
     def pred_epsilon(self, sample, model_output, timestep):
-        alpha_prod_t = self.scheduler.alphas_cumprod[timestep]
+        alpha_prod_t = self.scheduler.alphas_cumprod[int(timestep.item())]
 
         beta_prod_t = 1 - alpha_prod_t
         if self.scheduler.config.prediction_type == "epsilon":
