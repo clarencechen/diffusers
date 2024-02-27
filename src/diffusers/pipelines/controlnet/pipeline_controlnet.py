@@ -91,6 +91,41 @@ EXAMPLE_DOC_STRING = """
 """
 
 
+def calc_mean_std(feat: torch.Tensor, eps: float = 1e-5):
+    """
+    Calculate mean and standard deviation for adaptive instance normalization.
+
+    Args:
+        feat (`torch.Tensor`): 4D tensor.
+        eps (`float`, *optional*, defaults to 1e-5):
+            A small value added to the variance to avoid division by zero.
+    """
+    size = feat.size()
+    if len(size) != 4:
+        raise ValueError("The input `feat` should be a 4D tensor.")
+    b, c = size[:2]
+    feat_var = feat.reshape(b, c, -1).var(dim=2) + eps
+    feat_std = feat_var.sqrt().reshape(b, c, 1, 1)
+    feat_mean = feat.reshape(b, c, -1).mean(dim=2).reshape(b, c, 1, 1)
+    return feat_mean, feat_std
+
+
+def adaptive_instance_normalization(content_feat: torch.Tensor, style_feat: torch.Tensor):
+    """
+    Adaptive instance normalization. Adjust the reference features to have the similar color and illuminations
+    as those in the degradate features.
+
+    Args:
+        content_feat (`torch.Tensor`): The reference feature.
+        style_feat (`torch.Tensor`): The degraded features.
+    """
+    size = content_feat.size()
+    style_mean, style_std = calc_mean_std(style_feat)
+    content_mean, content_std = calc_mean_std(content_feat)
+    normalized_feat = (content_feat - content_mean.expand(size)) / content_std.expand(size)
+    return normalized_feat * style_std.expand(size) + style_mean.expand(size)
+
+
 # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.retrieve_timesteps
 def retrieve_timesteps(
     scheduler,
@@ -1281,8 +1316,9 @@ class StableDiffusionControlNetPipeline(
             generator,
             latents,
         )
+        controlnet_cond = image
         if controlnet.controlnet_cond_embedding is None:
-            image = self.prepare_image_latents(
+            controlnet_cond = self.prepare_image_latents(
                 batch_size * num_images_per_prompt, prompt_embeds.dtype, device, generator, image
             )
 
@@ -1350,7 +1386,7 @@ class StableDiffusionControlNetPipeline(
                     control_model_input,
                     t,
                     encoder_hidden_states=controlnet_prompt_embeds,
-                    controlnet_cond=image,
+                    controlnet_cond=controlnet_cond,
                     conditioning_scale=cond_scale,
                     guess_mode=guess_mode,
                     return_dict=False,
@@ -1416,9 +1452,10 @@ class StableDiffusionControlNetPipeline(
             torch.cuda.empty_cache()
 
         if not output_type == "latent":
-            image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False, generator=generator)[
-                0
-            ]
+            result = self.vae.decode(
+                latents / self.vae.config.scaling_factor, return_dict=False, generator=generator
+            )[0]
+            image = adaptive_instance_normalization(result, image)
             image, has_nsfw_concept = self.run_safety_checker(image, device, prompt_embeds.dtype)
         else:
             image = latents
