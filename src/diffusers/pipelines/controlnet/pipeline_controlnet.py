@@ -589,6 +589,41 @@ class StableDiffusionControlNetPipeline(
             extra_step_kwargs["generator"] = generator
         return extra_step_kwargs
 
+    def get_timesteps(self, num_inference_steps, denoising_start=None, denoising_end=None):
+        timesteps = self.scheduler.timesteps
+
+        # Strength is irrelevant if we directly request a timestep to start at;
+        # that is, strength is determined by the denoising_start instead.
+        if denoising_start is not None:
+            discrete_timestep_cutoff = int(
+                round(
+                    self.scheduler.config.num_train_timesteps
+                    - (denoising_start * self.scheduler.config.num_train_timesteps)
+                )
+            )
+            num_inference_steps = (timesteps < discrete_timestep_cutoff).sum().item()
+            if self.scheduler.order == 2 and num_inference_steps % 2 == 0:
+                num_inference_steps = num_inference_steps + 1
+            timesteps = timesteps[-num_inference_steps:]
+
+        if denoising_end is not None:
+            discrete_timestep_cutoff = int(
+                round(
+                    self.scheduler.config.num_train_timesteps
+                    - (denoising_end * self.scheduler.config.num_train_timesteps)
+                )
+            )
+            num_inference_steps = (timesteps > discrete_timestep_cutoff).sum().item()
+            if self.scheduler.order == 2 and num_inference_steps % 2 == 0:
+                num_inference_steps = num_inference_steps + 1
+            timesteps = timesteps[:num_inference_steps]
+
+        first_timestep = torch.tensor(
+            [self.scheduler.config.num_train_timesteps - 1], device=timesteps.device, dtype=timesteps.dtype
+        )
+        timesteps = torch.cat([first_timestep, timesteps])
+        return timesteps, num_inference_steps
+
     def check_inputs(
         self,
         prompt,
@@ -874,6 +909,26 @@ class StableDiffusionControlNetPipeline(
 
         return image_latents
 
+    def pred_x0(self, sample, model_output, timestep):
+        alpha_prod_t = self.scheduler.alphas_cumprod[timestep].to(sample.device)
+
+        beta_prod_t = 1 - alpha_prod_t
+        if self.scheduler.config.prediction_type == "epsilon":
+            pred_original_sample = (sample - beta_prod_t ** (0.5) * model_output) / alpha_prod_t ** (0.5)
+        elif self.scheduler.config.prediction_type == "sample":
+            pred_original_sample = model_output
+        elif self.scheduler.config.prediction_type == "v_prediction":
+            pred_original_sample = (alpha_prod_t**0.5) * sample - (beta_prod_t**0.5) * model_output
+            # predict V
+            model_output = (alpha_prod_t**0.5) * model_output + (beta_prod_t**0.5) * sample
+        else:
+            raise ValueError(
+                f"prediction_type given as {self.scheduler.config.prediction_type} must be one of `epsilon`, `sample`,"
+                " or `v_prediction`"
+            )
+
+        return pred_original_sample
+
     # Copied from diffusers.pipelines.latent_consistency_models.pipeline_latent_consistency_text2img.LatentConsistencyModelPipeline.get_guidance_scale_embedding
     def get_guidance_scale_embedding(
         self, w: torch.Tensor, embedding_dim: int = 512, dtype: torch.dtype = torch.float32
@@ -958,6 +1013,8 @@ class StableDiffusionControlNetPipeline(
         clip_skip: Optional[int] = None,
         callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
+        denoising_start: float = 0.333,
+        denoising_end: float = 0.667,
         **kwargs,
     ):
         r"""
@@ -1208,7 +1265,8 @@ class StableDiffusionControlNetPipeline(
             assert False
 
         # 5. Prepare timesteps
-        timesteps, num_inference_steps = retrieve_timesteps(self.scheduler, num_inference_steps, device, timesteps)
+        retrieve_timesteps(self.scheduler, num_inference_steps, device, timesteps)
+        timesteps, num_inference_steps = self.get_timesteps(num_inference_steps, denoising_start, denoising_end)
         self._num_timesteps = len(timesteps)
 
         # 6. Prepare latent variables
@@ -1324,7 +1382,14 @@ class StableDiffusionControlNetPipeline(
                     noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
 
                 # compute the previous noisy sample x_t -> x_t-1
-                latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
+                if i == 0 and denoising_start > 0.0:
+                    latents = self.pred_x0(latents, noise_pred, self.scheduler.config.num_train_timesteps - 1)
+                    noise = randn_tensor(latents.shape, generator=generator, device=device, dtype=latents.dtype)
+                    latents = self.scheduler.add_noise(latents, noise, timesteps[1:2])
+                else:
+                    latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
+                if i == len(timesteps) - 1 and denoising_end < 1.0:
+                    latents = self.pred_x0(latents, noise_pred, self.scheduler.timesteps[self.scheduler.step_index])
 
                 if callback_on_step_end is not None:
                     callback_kwargs = {}
