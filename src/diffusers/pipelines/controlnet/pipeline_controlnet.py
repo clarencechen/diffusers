@@ -995,6 +995,40 @@ class StableDiffusionControlNetPipeline(
         assert emb.shape == (w.shape[0], embedding_dim)
         return emb
 
+    def reshape_to_overlapping_tiles(self, x: torch.Tensor, tile_size: int) -> torch.Tensor:
+        height, width = x.shape[-2:]
+        half_tile_size = tile_size // 2
+        tiled_shape = (*x.shape[:-2], height // tile_size, tile_size, width // tile_size, tile_size)
+        tiled_shifted_shape = (*x.shape[:-2], height // tile_size - 1, tile_size, width // tile_size - 1, tile_size)
+        permute_args = (x.ndim - 2, x.ndim, *range(x.ndim - 2), x.ndim - 1, x.ndim + 1)
+        x_unshifted_tiled = x.reshape(*tiled_shape).permute(*permute_args).flatten(0, 2)
+        x_shifted = x[..., half_tile_size: -half_tile_size, half_tile_size: -half_tile_size]
+        x_shifted_tiled = x_shifted.reshape(*tiled_shifted_shape).permute(*permute_args).flatten(0, 2)
+
+        return torch.cat([x_unshifted_tiled, x_shifted_tiled], dim=0)
+
+    def reshape_from_overlapping_tiles(
+        self, x: torch.Tensor, tile_size: int, height: int, width: int
+    ) -> torch.Tensor:
+        half_tile_size = tile_size // 2
+        permute_args = (*range(2, x.ndim), 0, x.ndim, 1, x.ndim + 1)
+        orig_batch_size = x.shape[0] // (
+            2 * height // tile_size * width // tile_size - (height + width) // tile_size + 1
+        )
+        x_unshifted_tiled = x[:orig_batch_size * height // tile_size * width // tile_size]
+        x_shifted_tiled = x[orig_batch_size * height // tile_size * width // tile_size:]
+        x_unshifted = x_unshifted_tiled.reshape(
+            height // tile_size, width // tile_size, orig_batch_size, *x_unshifted_tiled.shape[1:]
+        ).permute(*permute_args).flatten(-2).flatten(-3, -2)
+        x_shifted = x_shifted_tiled.reshape(
+            height // tile_size - 1, width // tile_size - 1, orig_batch_size, *x_shifted_tiled.shape[1:]
+        ).permute(*permute_args).flatten(-2).flatten(-3, -2)
+
+        x_shifted_padded = x_unshifted.clone()
+        x_shifted_padded[..., half_tile_size: -half_tile_size, half_tile_size: -half_tile_size] = x_shifted
+
+        return torch.stack([x_unshifted, x_shifted_padded], dim=-1).mean(-1)
+
     @property
     def guidance_scale(self):
         return self._guidance_scale
@@ -1050,6 +1084,7 @@ class StableDiffusionControlNetPipeline(
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
         denoising_start: float = 0.333,
         denoising_end: float = 0.667,
+        tile_size: int = 512,
         **kwargs,
     ):
         r"""
@@ -1330,6 +1365,16 @@ class StableDiffusionControlNetPipeline(
                 guidance_scale_tensor, embedding_dim=self.unet.config.time_cond_proj_dim
             ).to(device=device, dtype=latents.dtype)
 
+        if tile_size is not None:
+            latent_tile_size = tile_size // self.vae_scale_factor
+            controlnet_cond = self.reshape_to_overlapping_tiles(
+                controlnet_cond, latent_tile_size if controlnet.controlnet_cond_embedding is None else tile_size
+            )
+            num_tiles = controlnet_cond.shape[0] // (batch_size * num_images_per_prompt)
+            prompt_embeds = prompt_embeds.repeat(num_tiles, 1, 1)
+            if self.unet.config.time_cond_proj_dim is not None:
+                timestep_cond = timestep_cond.repeat(num_tiles)
+
         # 7. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
 
@@ -1382,6 +1427,12 @@ class StableDiffusionControlNetPipeline(
                         controlnet_cond_scale = controlnet_cond_scale[0]
                     cond_scale = controlnet_cond_scale * controlnet_keep[i]
 
+                if tile_size is not None:
+                    latent_tile_size = tile_size // self.vae_scale_factor
+                    latent_height, latent_width = latent_model_input.shape[-2:]
+                    latent_model_input = self.reshape_to_overlapping_tiles(latent_model_input, latent_tile_size)
+                    control_model_input = self.reshape_to_overlapping_tiles(control_model_input, latent_tile_size)
+
                 down_block_res_samples, mid_block_res_sample = self.controlnet(
                     control_model_input,
                     t,
@@ -1411,6 +1462,11 @@ class StableDiffusionControlNetPipeline(
                     added_cond_kwargs=added_cond_kwargs,
                     return_dict=False,
                 )[0]
+
+                if tile_size is not None:
+                    noise_pred = self.reshape_from_overlapping_tiles(
+                        noise_pred, latent_tile_size, latent_height, latent_width
+                    )
 
                 # perform guidance
                 if self.do_classifier_free_guidance:
